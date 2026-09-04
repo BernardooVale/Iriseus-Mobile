@@ -40,8 +40,8 @@ class CameraStreamer(
     private var socket: Socket? = null
     private var outStream: DataOutputStream? = null
     @Volatile private var streaming = false
-    private val analysisExecutor = Executors.newSingleThreadExecutor()
-    private val networkExecutor = Executors.newSingleThreadExecutor()
+    private var analysisExecutor = Executors.newSingleThreadExecutor()
+    private var networkExecutor = Executors.newSingleThreadExecutor()
     private var onStatus: ((String) -> Unit)? = null
 
     fun startPreview() {
@@ -74,6 +74,11 @@ class CameraStreamer(
     fun startStreaming(ip: String, port: Int, statusCallback: (String) -> Unit) {
         onStatus = statusCallback
         if (streaming) return
+
+        // recriar executors se encerrados
+        if (networkExecutor.isShutdown) networkExecutor = Executors.newSingleThreadExecutor()
+        if (analysisExecutor.isShutdown) analysisExecutor = Executors.newSingleThreadExecutor()
+
         streaming = true
         statusCallback("connecting")
         networkExecutor.execute {

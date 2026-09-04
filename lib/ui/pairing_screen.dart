@@ -41,7 +41,7 @@ class _PairingScreenState extends State<PairingScreen> with SingleTickerProvider
       final accepted = await _pairingManager.pair(
         ws: widget.ws, pin: payload.pin, pcPublicKeyB64: payload.pk,
         pcDeviceId: welcome?['deviceId'] ?? 'unknown',
-        pcDeviceName: welcome?['deviceName'] ?? 'DevLink PC',
+        pcDeviceName: welcome?['deviceName'] ?? 'Iriseus PC',
         pcIp: payload.ip,
       );
 
@@ -75,7 +75,7 @@ class _PairingScreenState extends State<PairingScreen> with SingleTickerProvider
       final accepted = await _pairingManager.pair(
         ws: widget.ws, pin: _pinController.text.trim(), pcPublicKeyB64: '',
         pcDeviceId: welcome?['deviceId'] ?? 'unknown',
-        pcDeviceName: welcome?['deviceName'] ?? 'DevLink PC',
+        pcDeviceName: welcome?['deviceName'] ?? 'Iriseus PC',
         pcIp: widget.ip!,
       );
 

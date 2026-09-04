@@ -4,10 +4,13 @@ import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
+import android.content.Context
+import android.net.wifi.WifiManager
 
 class MainActivity : FlutterActivity() {
     private var eventSink: EventChannel.EventSink? = null
     private var cameraStreamer: CameraStreamer? = null
+    private var multicastLock: WifiManager.MulticastLock? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -30,6 +33,26 @@ class MainActivity : FlutterActivity() {
                     }
                     "stopStream" -> { streamer.stopStreaming(); result.success(null) }
                     "switchCamera" -> { streamer.switchCamera(); result.success(null) }
+                    else -> result.notImplemented()
+                }
+            }
+
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "com.example.iriseus/wifi")
+            .setMethodCallHandler { call, result ->
+                val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+                when (call.method) {
+                    "acquireMulticastLock" -> {
+                        multicastLock = wifi.createMulticastLock("iriseus_mdns").apply {
+                            setReferenceCounted(true)
+                            acquire()
+                        }
+                        result.success(null)
+                    }
+                    "releaseMulticastLock" -> {
+                        multicastLock?.release()
+                        multicastLock = null
+                        result.success(null)
+                    }
                     else -> result.notImplemented()
                 }
             }

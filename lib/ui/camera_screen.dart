@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../core/stream_controller.dart';
 import '../core/ws_client.dart';
+import '../core/pairing_manager.dart';
 
 class CameraScreen extends StatefulWidget {
   final WsClient ws;
@@ -12,6 +13,7 @@ class CameraScreen extends StatefulWidget {
 
 class _CameraScreenState extends State<CameraScreen> {
   final _streamController = CameraStreamController();
+  final _pairingManager = PairingManager();
   CameraStreamStatus _status = CameraStreamStatus.idle;
 
   @override
@@ -21,6 +23,13 @@ class _CameraScreenState extends State<CameraScreen> {
     _streamController.status.listen((s) => setState(() => _status = s));
     widget.ws.sendStartCamera();
     _streamController.startStreaming(widget.pcIp, 45679);
+
+    widget.ws.enableAutoReconnect(widget.pcIp, 45678, () async {
+      final deviceId = await _pairingManager.getOrCreateDeviceId();
+      widget.ws.sendHello(deviceId, _pairingManager.deviceName);
+      widget.ws.sendStartCamera();
+      _streamController.startStreaming(widget.pcIp, 45679);
+    });
   }
 
   @override
@@ -39,7 +48,7 @@ class _CameraScreenState extends State<CameraScreen> {
             icon: const Icon(Icons.cameraswitch)),
       ]),
       body: Stack(children: [
-        const Positioned.fill(child: AndroidView(viewType: 'com.iriseus.app/camera_preview')),
+        const Positioned.fill(child: AndroidView(viewType: 'com.example.iriseus/camera_preview')),
         Positioned(top: 16, left: 16,
             child: Chip(label: Text(_statusLabel()), backgroundColor: _statusColor())),
       ]),
