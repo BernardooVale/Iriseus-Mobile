@@ -30,6 +30,12 @@ class _CameraScreenState extends State<CameraScreen> {
       widget.ws.sendStartCamera();
       _streamController.startStreaming(widget.pcIp, 45679);
     });
+
+    // inicia stream só se já conectado
+    if (widget.ws.currentState == WsConnectionState.connected) {
+      widget.ws.sendStartCamera();
+      _streamController.startStreaming(widget.pcIp, 45679);
+    }
   }
 
   @override

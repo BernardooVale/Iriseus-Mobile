@@ -10,6 +10,7 @@ class WsClient {
   StreamSubscription? _sub;
   Timer? _pingTimer;
   Timer? _reconnectTimer;
+  StreamSubscription? _reconnectSub;
 
   final _messageController = StreamController<Map<String, dynamic>>.broadcast();
   final _stateController = StreamController<WsConnectionState>.broadcast();
@@ -79,16 +80,15 @@ class WsClient {
 
   /// Reconecta automaticamente ao IP salvo se socket cair. Sem novo pareamento.
   void enableAutoReconnect(String ip, int port, void Function() onReconnected) {
-    state.listen((s) {
+    _reconnectSub?.cancel(); // cancela listener anterior
+    _reconnectSub = state.listen((s) {
       if (s == WsConnectionState.disconnected) {
         _reconnectTimer?.cancel();
         _reconnectTimer = Timer(const Duration(seconds: 3), () async {
           try {
             await connect(ip, port);
             onReconnected();
-          } catch (_) {
-            // próxima tentativa disparada pelo próximo evento disconnected
-          }
+          } catch (_) {}
         });
       }
     });
@@ -109,6 +109,7 @@ class WsClient {
 
   void dispose() {
     _reconnectTimer?.cancel();
+    _reconnectSub?.cancel(); // adiciona
     disconnect();
     _messageController.close();
     _stateController.close();
