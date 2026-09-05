@@ -21,8 +21,6 @@ class _CameraScreenState extends State<CameraScreen> {
     super.initState();
     _streamController.init();
     _streamController.status.listen((s) => setState(() => _status = s));
-    widget.ws.sendStartCamera();
-    _streamController.startStreaming(widget.pcIp, 45679);
 
     widget.ws.enableAutoReconnect(widget.pcIp, 45678, () async {
       final deviceId = await _pairingManager.getOrCreateDeviceId();
@@ -31,7 +29,6 @@ class _CameraScreenState extends State<CameraScreen> {
       _streamController.startStreaming(widget.pcIp, 45679);
     });
 
-    // inicia stream só se já conectado
     if (widget.ws.currentState == WsConnectionState.connected) {
       widget.ws.sendStartCamera();
       _streamController.startStreaming(widget.pcIp, 45679);
