@@ -44,6 +44,10 @@ class CameraStreamer(
     private var networkExecutor = Executors.newSingleThreadExecutor()
     private var onStatus: ((String) -> Unit)? = null
 
+    private var encoderWidth = WIDTH
+
+    private var encoderHeight = HEIGHT
+
     fun startPreview() {
         val providerFuture = ProcessCameraProvider.getInstance(context)
         providerFuture.addListener({
@@ -73,30 +77,37 @@ class CameraStreamer(
 
     fun startStreaming(ip: String, port: Int, statusCallback: (String) -> Unit) {
         onStatus = statusCallback
-        if (streaming) return
+        if (streaming) stopStreaming()
 
         if (networkExecutor.isShutdown) networkExecutor = Executors.newSingleThreadExecutor()
         if (analysisExecutor.isShutdown) analysisExecutor = Executors.newSingleThreadExecutor()
 
+        // setupEncoder antes de setar streaming=true
+        setupEncoder()
         streaming = true
-        postStatus("connecting")          // era statusCallback("connecting")
+        postStatus("connecting")
         networkExecutor.execute {
             try {
                 socket = Socket(ip, port).apply { tcpNoDelay = true }
                 outStream = DataOutputStream(socket!!.getOutputStream())
-                setupEncoder()
-                postStatus("streaming")   // era statusCallback("streaming")
+                // setupEncoder() — removido daqui
+                postStatus("streaming")
+                Log.d(TAG, "Socket conectado, iniciando drainEncoderLoop")
                 drainEncoderLoop()
+                Log.d(TAG, "drainEncoderLoop encerrou")
             } catch (e: Exception) {
                 Log.e(TAG, "Falha ao conectar socket de stream", e)
                 streaming = false
-                postStatus("error")       // era statusCallback("error")
+                encoder?.stop(); encoder?.release(); encoder = null
+                postStatus("error")
             }
         }
     }
 
-    private fun setupEncoder() {
-        val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, WIDTH, HEIGHT).apply {
+    private fun setupEncoder(w: Int = WIDTH, h: Int = HEIGHT) {
+        encoderWidth = w
+        encoderHeight = h
+        val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, w, h).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible)
             setInteger(MediaFormat.KEY_BIT_RATE, BITRATE)
             setInteger(MediaFormat.KEY_FRAME_RATE, FRAME_RATE)
@@ -138,7 +149,9 @@ class CameraStreamer(
     }
 
     private fun onFrame(image: ImageProxy) {
-        if (!streaming || encoder == null) { image.close(); return }
+        if (!streaming || encoder == null) {
+            Log.d(TAG, "onFrame descartado: streaming=$streaming encoder=${encoder != null}")
+            image.close(); return }
         try {
             queueToEncoder(yuv420ToNv21(image))
         } catch (e: Exception) {
@@ -154,19 +167,49 @@ class CameraStreamer(
         if (inIndex >= 0) {
             val inputBuffer = codec.getInputBuffer(inIndex) ?: return
             inputBuffer.clear()
-            inputBuffer.put(nv21)
-            codec.queueInputBuffer(inIndex, 0, nv21.size, System.nanoTime() / 1000, 0)
+            // inputBuffer.put(nv21)
+            val bytesToWrite = minOf(nv21.size, inputBuffer.remaining())
+            inputBuffer.put(nv21, 0, bytesToWrite)
+            codec.queueInputBuffer(inIndex, 0, bytesToWrite, System.nanoTime() / 1000, 0)
         }
     }
 
     // Conversão simplificada — assume sem row padding. Ver nota abaixo.
     private fun yuv420ToNv21(image: ImageProxy): ByteArray {
-        val yPlane = image.planes[0]; val uPlane = image.planes[1]; val vPlane = image.planes[2]
-        val ySize = yPlane.buffer.remaining(); val uSize = uPlane.buffer.remaining(); val vSize = vPlane.buffer.remaining()
-        val nv21 = ByteArray(ySize + uSize + vSize)
-        yPlane.buffer.get(nv21, 0, ySize)
-        vPlane.buffer.get(nv21, ySize, vSize)
-        uPlane.buffer.get(nv21, ySize + vSize, uSize)
+        val width = image.width
+        val height = image.height
+
+        Log.d(TAG, "yuv420ToNv21: ${width}x${height}")
+
+        val ySize = width * height
+        val uvSize = width * height / 2
+        val nv21 = ByteArray(ySize + uvSize)
+
+        val yPlane = image.planes[0]
+        val uPlane = image.planes[1]
+        val vPlane = image.planes[2]
+
+        // copia Y linha a linha respeitando row stride
+        val yRowStride = yPlane.rowStride
+        val yBuf = yPlane.buffer
+        for (row in 0 until height) {
+            yBuf.position(row * yRowStride)
+            yBuf.get(nv21, row * width, width)
+        }
+
+        // intercala V e U para NV21 (V primeiro)
+        val uvRowStride = uPlane.rowStride
+        val uvPixelStride = uPlane.pixelStride
+        val uBuf = uPlane.buffer
+        val vBuf = vPlane.buffer
+        var uvIndex = ySize
+        for (row in 0 until height / 2) {
+            for (col in 0 until width / 2) {
+                val bufIndex = row * uvRowStride + col * uvPixelStride
+                nv21[uvIndex++] = vBuf.get(bufIndex)
+                nv21[uvIndex++] = uBuf.get(bufIndex)
+            }
+        }
         return nv21
     }
 

@@ -10,6 +10,10 @@ import android.net.wifi.WifiManager
 class MainActivity : FlutterActivity() {
     private var eventSink: EventChannel.EventSink? = null
     private var cameraStreamer: CameraStreamer? = null
+
+    private var pendingStreamArgs: Pair<String, Int>? = null
+
+    private var pendingStatusCallback: ((String) -> Unit)? = null
     private var multicastLock: WifiManager.MulticastLock? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -17,22 +21,36 @@ class MainActivity : FlutterActivity() {
 
         flutterEngine.platformViewsController.registry.registerViewFactory(
             "com.example.iriseus/camera_preview",
-            CameraStreamViewFactory(this) { streamer -> cameraStreamer = streamer }
+            CameraStreamViewFactory(this) { streamer ->
+                cameraStreamer = streamer
+                // dispara stream pendente se houver
+                val args = pendingStreamArgs
+                val cb = pendingStatusCallback
+                if (args != null && cb != null) {
+                    streamer.startStreaming(args.first, args.second, cb)
+                    pendingStreamArgs = null
+                    pendingStatusCallback = null
+                }
+            }
         )
 
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "com.example.iriseus/camera")
             .setMethodCallHandler { call, result ->
-                val streamer = cameraStreamer
-                if (streamer == null) { result.error("NO_CAMERA", "Preview não iniciado", null); return@setMethodCallHandler }
                 when (call.method) {
                     "startStream" -> {
-                        streamer.startStreaming(call.argument("ip")!!, call.argument("port")!!) { s ->
-                            eventSink?.success(mapOf("status" to s))
+                        val ip: String = call.argument("ip")!!
+                        val port: Int = call.argument("port")!!
+                        val cb: (String) -> Unit = { s -> eventSink?.success(mapOf("status" to s)) }
+                        cameraStreamer?.let { streamer ->
+                            streamer.startStreaming(ip, port, cb)
+                        } ?: run {
+                            pendingStreamArgs = Pair(ip, port)
+                            pendingStatusCallback = cb
                         }
                         result.success(null)
                     }
-                    "stopStream" -> { streamer.stopStreaming(); result.success(null) }
-                    "switchCamera" -> { streamer.switchCamera(); result.success(null) }
+                    "stopStream" -> { cameraStreamer?.stopStreaming(); result.success(null) }
+                    "switchCamera" -> { cameraStreamer?.switchCamera(); result.success(null) }
                     else -> result.notImplemented()
                 }
             }
