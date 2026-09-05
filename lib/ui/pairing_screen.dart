@@ -34,16 +34,39 @@ class _PairingScreenState extends State<PairingScreen> with SingleTickerProvider
     try {
       final payload = QrPayload.fromJsonString(raw);
       await widget.ws.connect(payload.ip, payload.port);
-      final deviceId = await _pairingManager.getOrCreateDeviceId();
-      widget.ws.sendHello(deviceId, _pairingManager.deviceName);
-      final welcome = await widget.ws.waitForType('welcome');
 
-      final accepted = await _pairingManager.pair(
-        ws: widget.ws, pin: payload.pin, pcPublicKeyB64: payload.pk,
-        pcDeviceId: welcome?['deviceId'] ?? 'unknown',
-        pcDeviceName: welcome?['deviceName'] ?? 'Iriseus PC',
-        pcIp: payload.ip,
+      // 1. Listener antes de qualquer envio
+      final pairResultFuture = widget.ws.messages
+          .firstWhere((m) => m['type'] == 'pair_accepted' || m['type'] == 'pair_rejected')
+          .timeout(const Duration(seconds: 15));
+
+      final deviceId = await _pairingManager.getOrCreateDeviceId();
+      final myPk = await _pairingManager.generateEphemeralKeyPair();
+
+      // 2. Hello → welcome (pk já vem do QR, mas welcome traz deviceId/Name)
+      widget.ws.sendHello(deviceId, _pairingManager.deviceName);
+      final welcome = await widget.ws.waitForType('welcome')
+          .timeout(const Duration(seconds: 5));
+
+      // pk vem do QR diretamente — não depende do welcome
+      widget.ws.sendPairRequest(
+        pin: payload.pin,
+        pk: myPk,
+        deviceId: deviceId,
+        deviceName: _pairingManager.deviceName,
       );
+
+      final result = await pairResultFuture;
+      final accepted = result['type'] == 'pair_accepted';
+
+      if (accepted) {
+        await _pairingManager.deriveAndPersist(
+          pcPublicKeyB64: payload.pk,
+          pcDeviceId: welcome?['deviceId'] ?? 'unknown',
+          pcDeviceName: welcome?['deviceName'] ?? 'Iriseus PC',
+          pcIp: payload.ip,
+        );
+      }
 
       if (!mounted) return;
       if (accepted) {
@@ -61,23 +84,46 @@ class _PairingScreenState extends State<PairingScreen> with SingleTickerProvider
 
   Future<void> _handlePinSubmit() async {
     if (widget.ip == null) {
-      setState(() => _error = 'IP do PC desconhecido. Use descoberta automática ou QR.');
+      setState(() => _error = 'IP do PC desconhecido.');
       return;
     }
     setState(() => _busy = true);
     try {
       await widget.ws.connect(widget.ip!, widget.port);
-      final deviceId = await _pairingManager.getOrCreateDeviceId();
-      widget.ws.sendHello(deviceId, _pairingManager.deviceName);
-      final welcome = await widget.ws.waitForType('welcome');
 
-      // pcPublicKeyB64 vazio — ver gap de protocolo no pairing_manager.
-      final accepted = await _pairingManager.pair(
-        ws: widget.ws, pin: _pinController.text.trim(), pcPublicKeyB64: '',
-        pcDeviceId: welcome?['deviceId'] ?? 'unknown',
-        pcDeviceName: welcome?['deviceName'] ?? 'Iriseus PC',
-        pcIp: widget.ip!,
+      // 1. Listener ativo ANTES de qualquer envio
+      final pairResultFuture = widget.ws.messages
+          .firstWhere((m) => m['type'] == 'pair_accepted' || m['type'] == 'pair_rejected')
+          .timeout(const Duration(seconds: 15));
+
+      final deviceId = await _pairingManager.getOrCreateDeviceId();
+      final myPk = await _pairingManager.generateEphemeralKeyPair();
+
+      // 2. Enviar hello, esperar welcome
+      widget.ws.sendHello(deviceId, _pairingManager.deviceName);
+      final welcome = await widget.ws.waitForType('welcome')
+          .timeout(const Duration(seconds: 5));
+      final pcPk = welcome?['pk'] as String? ?? '';
+
+      // 3. Enviar pair_request — listener já está ativo
+      widget.ws.sendPairRequest(
+        pin: _pinController.text.trim(),
+        pk: myPk,
+        deviceId: deviceId,
+        deviceName: _pairingManager.deviceName,
       );
+
+      final result = await pairResultFuture;
+      final accepted = result['type'] == 'pair_accepted';
+
+      if (accepted) {
+        await _pairingManager.deriveAndPersist(
+          pcPublicKeyB64: pcPk,
+          pcDeviceId: welcome?['deviceId'] ?? 'unknown',
+          pcDeviceName: welcome?['deviceName'] ?? 'Iriseus PC',
+          pcIp: widget.ip!,
+        );
+      }
 
       if (!mounted) return;
       if (accepted) {

@@ -75,23 +75,22 @@ class CameraStreamer(
         onStatus = statusCallback
         if (streaming) return
 
-        // recriar executors se encerrados
         if (networkExecutor.isShutdown) networkExecutor = Executors.newSingleThreadExecutor()
         if (analysisExecutor.isShutdown) analysisExecutor = Executors.newSingleThreadExecutor()
 
         streaming = true
-        statusCallback("connecting")
+        postStatus("connecting")          // era statusCallback("connecting")
         networkExecutor.execute {
             try {
                 socket = Socket(ip, port).apply { tcpNoDelay = true }
                 outStream = DataOutputStream(socket!!.getOutputStream())
                 setupEncoder()
-                statusCallback("streaming")
+                postStatus("streaming")   // era statusCallback("streaming")
                 drainEncoderLoop()
             } catch (e: Exception) {
                 Log.e(TAG, "Falha ao conectar socket de stream", e)
                 streaming = false
-                statusCallback("error")
+                postStatus("error")       // era statusCallback("error")
             }
         }
     }
@@ -128,12 +127,12 @@ class CameraStreamer(
     private fun writeFramed(nalu: ByteArray) {
         try {
             val out = outStream ?: return
-            out.writeInt(nalu.size) // DataOutputStream.writeInt já é big-endian
+            out.writeInt(nalu.size)
             out.write(nalu)
             out.flush()
         } catch (e: Exception) {
             Log.e(TAG, "Erro ao escrever NALU", e)
-            onStatus?.invoke("error")
+            postStatus("error")           // era onStatus?.invoke("error")
             stopStreaming()
         }
     }
@@ -184,5 +183,11 @@ class CameraStreamer(
         cameraProvider?.unbindAll()
         analysisExecutor.shutdown()
         networkExecutor.shutdown()
+    }
+
+    private fun postStatus(status: String) {
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            onStatus?.invoke(status)
+        }
     }
 }

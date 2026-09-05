@@ -49,41 +49,7 @@ class PairingManager {
     return _b64UrlNoPad(pub.bytes);
   }
 
-  Future<bool> pair({
-    required WsClient ws,
-    required String pin,
-    required String pcPublicKeyB64,
-    required String pcDeviceId,
-    required String pcDeviceName,
-    required String pcIp,
-  }) async {
-    final deviceId = await getOrCreateDeviceId();
-    final myPk = await generateEphemeralKeyPair();
-
-    final completer = Completer<bool>();
-    late final StreamSubscription sub;
-    sub = ws.messages.listen((msg) {
-      if (msg['type'] == 'pair_accepted') {
-        completer.complete(true);
-        sub.cancel();
-      } else if (msg['type'] == 'pair_rejected') {
-        completer.complete(false);
-        sub.cancel();
-      }
-    });
-
-    ws.sendPairRequest(pin: pin, pk: myPk, deviceId: deviceId, deviceName: deviceName);
-    final accepted = await completer.future.timeout(const Duration(seconds: 15), onTimeout: () => false);
-
-    if (accepted) {
-      assert(pcPublicKeyB64.isNotEmpty, 'PC aceitou pareamento mas não enviou pk');
-      await _deriveAndPersist(pcPublicKeyB64: pcPublicKeyB64, pcDeviceId: pcDeviceId,
-          pcDeviceName: pcDeviceName, pcIp: pcIp);
-    }
-    return accepted;
-  }
-
-  Future<void> _deriveAndPersist({
+  Future<void> deriveAndPersist({
     required String pcPublicKeyB64,
     required String pcDeviceId,
     required String pcDeviceName,

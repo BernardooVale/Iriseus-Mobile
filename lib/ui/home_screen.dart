@@ -18,6 +18,7 @@ class _HomeScreenState extends State<HomeScreen> {
   final _pairingManager = PairingManager();
   List<Device> _devices = [];
   bool _scanning = false;
+  bool _usbAvailable = false;
 
   @override
   void initState() {
@@ -35,9 +36,11 @@ class _HomeScreenState extends State<HomeScreen> {
     final ws = WsClient();
     try {
       await ws.connect('127.0.0.1', 45678).timeout(const Duration(seconds: 1));
-      await _proceedAfterConnect(ws, '127.0.0.1');
+      await ws.disconnect();
+      // só marcar que USB está disponível
+      if (mounted) setState(() => _usbAvailable = true);
     } catch (_) {
-      // sem USB — segue fluxo normal de mDNS
+      // sem USB
     }
   }
 
@@ -51,7 +54,18 @@ class _HomeScreenState extends State<HomeScreen> {
     final ws = WsClient();
     try {
       await ws.connect('127.0.0.1', 45678);
-      await _proceedAfterConnect(ws, '127.0.0.1');
+      final pairing = await _pairingManager.loadPairingInfo();
+      final deviceId = await _pairingManager.getOrCreateDeviceId();
+      ws.sendHello(deviceId, _pairingManager.deviceName);
+
+      if (pairing != null) {
+        await ws.waitForType('welcome');
+        await _proceedAfterConnect(ws, '127.0.0.1');
+      } else {
+        if (!mounted) return;
+        Navigator.push(context, MaterialPageRoute(
+            builder: (_) => PairingScreen(ws: ws, ip: '127.0.0.1', port: 45678)));
+      }
     } catch (_) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -68,6 +82,7 @@ class _HomeScreenState extends State<HomeScreen> {
     if (pairing != null) {
       final deviceId = await _pairingManager.getOrCreateDeviceId();
       ws.sendHello(deviceId, _pairingManager.deviceName);
+      await ws.waitForType('welcome');
       await _pairingManager.updateLastKnownIp(device.ip);
       await _proceedAfterConnect(ws, device.ip);
     } else {
@@ -106,8 +121,13 @@ class _HomeScreenState extends State<HomeScreen> {
         Padding(
           padding: const EdgeInsets.all(16),
           child: Row(children: [
-            Expanded(child: OutlinedButton.icon(onPressed: _connectUsb,
-                icon: const Icon(Icons.usb), label: const Text('Conectar via USB'))),
+            Expanded(
+              child: OutlinedButton.icon(
+                onPressed: _connectUsb,
+                icon: Icon(Icons.usb, color: _usbAvailable ? Colors.green : null),
+                label: Text(_usbAvailable ? 'USB disponível — Conectar' : 'Conectar via USB'),
+              ),
+            ),
             const SizedBox(width: 12),
             Expanded(child: FilledButton.icon(
                 onPressed: () => Navigator.push(context, MaterialPageRoute(
