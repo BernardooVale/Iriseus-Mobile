@@ -17,8 +17,6 @@ import androidx.lifecycle.LifecycleOwner
 import java.io.DataOutputStream
 import java.net.Socket
 import java.util.concurrent.Executors
-import kotlin.collections.get
-import kotlin.text.get
 
 class CameraStreamer(
     private val context: Context,
@@ -30,8 +28,8 @@ class CameraStreamer(
         private const val WIDTH = 1280
         private const val HEIGHT = 720
         private const val FRAME_RATE = 30
-        private const val BITRATE = 2_000_000
-        private const val I_FRAME_INTERVAL = 1
+        private const val BITRATE = 1_500_000
+        private const val I_FRAME_INTERVAL = 2
     }
 
     private var cameraProvider: ProcessCameraProvider? = null
@@ -47,7 +45,6 @@ class CameraStreamer(
     private var encoderHeight = HEIGHT
     @Volatile private var pendingWidth = 0
     @Volatile private var pendingHeight = 0
-    private var nv21Buffer: ByteArray? = null
 
     fun startPreview() {
         val providerFuture = ProcessCameraProvider.getInstance(context)
@@ -85,8 +82,7 @@ class CameraStreamer(
         if (networkExecutor.isShutdown) networkExecutor = Executors.newSingleThreadExecutor()
         if (analysisExecutor.isShutdown) analysisExecutor = Executors.newSingleThreadExecutor()
 
-        // NÃO chamar setupEncoder() aqui
-        encoderWidth = 0  // força reconfig no primeiro frame
+        encoderWidth = 0
         encoderHeight = 0
         streaming = true
         postStatus("connecting")
@@ -104,7 +100,7 @@ class CameraStreamer(
         }
     }
 
-    private fun setupEncoder(w: Int = WIDTH, h: Int = HEIGHT) {
+    private fun setupEncoder(w: Int, h: Int) {
         encoderWidth = w
         encoderHeight = h
         val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, w, h).apply {
@@ -129,12 +125,12 @@ class CameraStreamer(
                 pendingHeight = 0
                 try { encoder?.stop(); encoder?.release() } catch (_: Exception) {}
                 setupEncoder(w, h)
-                continue  // volta pro topo sem tentar dequeue
+                continue
             }
 
             val codec = encoder
             if (codec == null) {
-                Thread.sleep(5)  // sem encoder ainda, aguarda
+                Thread.sleep(5)
                 continue
             }
 
@@ -156,7 +152,7 @@ class CameraStreamer(
             out.write(nalu)
             out.flush()
         } catch (e: Exception) {
-            postStatus("error")           // era onStatus?.invoke("error")
+            postStatus("error")
             stopStreaming()
         }
     }
@@ -172,15 +168,16 @@ class CameraStreamer(
                 image.close()
                 return
             }
-            if (encoder == null) { image.close(); return }  // encoder ainda não pronto
-            queueToEncoder(yuv420ToNv21(image))
+            if (encoder == null) { image.close(); return }
+            queueToEncoder(image)
         } catch (e: Exception) {
+            Log.e(TAG, "Erro processando frame", e)
         } finally {
             image.close()
         }
     }
 
-    private fun queueToEncoder(nv21: ByteArray) {
+    private fun queueToEncoder(image: ImageProxy) {
         val codec = encoder ?: return
         val inIndex = codec.dequeueInputBuffer(10_000)
         if (inIndex < 0) {
@@ -189,50 +186,38 @@ class CameraStreamer(
         }
         val inputBuffer = codec.getInputBuffer(inIndex) ?: return
         inputBuffer.clear()
-        val bytesToWrite = minOf(nv21.size, inputBuffer.remaining())
-        inputBuffer.put(nv21, 0, bytesToWrite)
-        codec.queueInputBuffer(inIndex, 0, bytesToWrite, System.nanoTime() / 1000, 0)
-    }
 
-    // Conversão simplificada — assume sem row padding. Ver nota abaixo.
-    private fun yuv420ToNv21(image: ImageProxy): ByteArray {
         val width = image.width
         val height = image.height
-
-        val ySize = width * height
-        val uvSize = width * height / 2
-        val totalSize = ySize + uvSize
-
-        val nv21 = if (nv21Buffer?.size == totalSize) nv21Buffer!! else {
-            ByteArray(totalSize).also { nv21Buffer = it }
-        }
-
         val yPlane = image.planes[0]
         val uPlane = image.planes[1]
         val vPlane = image.planes[2]
-
-        // copia Y linha a linha respeitando row stride
         val yRowStride = yPlane.rowStride
-        val yBuf = yPlane.buffer
-        for (row in 0 until height) {
-            yBuf.position(row * yRowStride)
-            yBuf.get(nv21, row * width, width)
-        }
-
-        // intercala V e U para NV21 (V primeiro)
         val uvRowStride = uPlane.rowStride
         val uvPixelStride = uPlane.pixelStride
+        val yBuf = yPlane.buffer
         val uBuf = uPlane.buffer
         val vBuf = vPlane.buffer
-        var uvIndex = ySize
+
+        // Y — linha a linha
+        for (row in 0 until height) {
+            yBuf.position(row * yRowStride)
+            val slice = yBuf.slice()
+            slice.limit(width)
+            inputBuffer.put(slice)
+        }
+
+        // UV interleaved (NV12: U antes de V)
         for (row in 0 until height / 2) {
             for (col in 0 until width / 2) {
-                val bufIndex = row * uvRowStride + col * uvPixelStride
-                nv21[uvIndex++] = uBuf.get(bufIndex)
-                nv21[uvIndex++] = vBuf.get(bufIndex)
+                val idx = row * uvRowStride + col * uvPixelStride
+                inputBuffer.put(uBuf.get(idx))
+                inputBuffer.put(vBuf.get(idx))
             }
         }
-        return nv21
+
+        val bytesWritten = inputBuffer.position()
+        codec.queueInputBuffer(inIndex, 0, bytesWritten, System.nanoTime() / 1000, 0)
     }
 
     fun stopStreaming() {
