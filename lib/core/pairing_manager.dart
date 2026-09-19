@@ -3,7 +3,6 @@ import 'dart:convert';
 import 'package:cryptography/cryptography.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
-import 'ws_client.dart';
 import '../models/pairing_info.dart';
 
 class QrPayload {
@@ -89,7 +88,8 @@ class PairingManager {
   String _b64UrlNoPad(List<int> bytes) => base64Url.encode(bytes).replaceAll('=', '');
   List<int> _b64UrlNoPadDecode(String s) {
     var padded = s;
-    while (padded.length % 4 != 0) padded += '=';
+    while (padded.length % 4 != 0) { padded += '='; }
+
     return base64Url.decode(padded);
   }
 }

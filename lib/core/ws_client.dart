@@ -25,9 +25,11 @@ class WsClient {
     await disconnect();
     _setState(WsConnectionState.connecting);
     try {
-      _channel = WebSocketChannel.connect(Uri.parse('ws://$ip:$port'));
+      final channel = WebSocketChannel.connect(Uri.parse('ws://$ip:$port'));
+      await channel.ready.timeout(const Duration(seconds: 4));
+      _channel = channel;
       _sub = _channel!.stream.listen(
-            (data) {
+        (data) {
           try {
             _messageController.add(jsonDecode(data as String) as Map<String, dynamic>);
           } catch (_) {

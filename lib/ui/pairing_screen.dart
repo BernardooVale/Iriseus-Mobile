@@ -1,97 +1,58 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
-import 'package:mobile_scanner/mobile_scanner.dart';
+import 'package:flutter/services.dart';
 import '../core/pairing_manager.dart';
 import '../core/ws_client.dart';
 import 'camera_screen.dart';
 
 class PairingScreen extends StatefulWidget {
   final WsClient ws;
-  final String? ip;
   final int port;
-  const PairingScreen({super.key, required this.ws, required this.ip, required this.port});
+  const PairingScreen({super.key, required this.ws, required this.port});
+
   @override
   State<PairingScreen> createState() => _PairingScreenState();
 }
 
-class _PairingScreenState extends State<PairingScreen> with SingleTickerProviderStateMixin {
+class _PairingScreenState extends State<PairingScreen> {
   final _pairingManager = PairingManager();
   final _pinController = TextEditingController();
-  late final TabController _tabController;
+  final _focusNode = FocusNode();
   bool _busy = false;
   String? _error;
 
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 2, vsync: this);
+    // Auto-foca no campo PIN
+    WidgetsBinding.instance.addPostFrameCallback((_) => _focusNode.requestFocus());
   }
 
-  Future<void> _handleQrDetect(BarcodeCapture capture) async {
-    if (_busy || capture.barcodes.isEmpty) return;
-    final raw = capture.barcodes.first.rawValue;
-    if (raw == null) return;
-    setState(() => _busy = true);
-    try {
-      final payload = QrPayload.fromJsonString(raw);
-      await widget.ws.connect(payload.ip, payload.port);
-
-      // 1. Listener antes de qualquer envio
-      final pairResultFuture = widget.ws.messages
-          .firstWhere((m) => m['type'] == 'pair_accepted' || m['type'] == 'pair_rejected')
-          .timeout(const Duration(seconds: 15));
-
-      final deviceId = await _pairingManager.getOrCreateDeviceId();
-      final myPk = await _pairingManager.generateEphemeralKeyPair();
-
-      // 2. Hello → welcome (pk já vem do QR, mas welcome traz deviceId/Name)
-      widget.ws.sendHello(deviceId, _pairingManager.deviceName);
-      final welcome = await widget.ws.waitForType('welcome')
-          .timeout(const Duration(seconds: 5));
-
-      // pk vem do QR diretamente — não depende do welcome
-      widget.ws.sendPairRequest(
-        pin: payload.pin,
-        pk: myPk,
-        deviceId: deviceId,
-        deviceName: _pairingManager.deviceName,
-      );
-
-      final result = await pairResultFuture;
-      final accepted = result['type'] == 'pair_accepted';
-
-      if (accepted) {
-        await _pairingManager.deriveAndPersist(
-          pcPublicKeyB64: payload.pk,
-          pcDeviceId: welcome?['deviceId'] ?? 'unknown',
-          pcDeviceName: welcome?['deviceName'] ?? 'Iriseus PC',
-          pcIp: payload.ip,
-        );
-      }
-
-      if (!mounted) return;
-      if (accepted) {
-        Navigator.pushReplacement(context, MaterialPageRoute(
-            builder: (_) => CameraScreen(ws: widget.ws, pcIp: payload.ip)));
-      } else {
-        setState(() => _error = 'Pareamento rejeitado. Tente novamente.');
-      }
-    } catch (e) {
-      setState(() => _error = 'QR inválido ou falha de conexão.');
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
+  @override
+  void dispose() {
+    _pinController.dispose();
+    _focusNode.dispose();
+    super.dispose();
   }
 
   Future<void> _handlePinSubmit() async {
-    if (widget.ip == null) {
-      setState(() => _error = 'IP do PC desconhecido.');
+    final pin = _pinController.text.trim();
+    if (pin.length < 6) {
+      setState(() => _error = 'O PIN deve ter 6 dígitos.');
       return;
     }
-    setState(() => _busy = true);
-    try {
-      await widget.ws.connect(widget.ip!, widget.port);
 
-      // 1. Listener ativo ANTES de qualquer envio
+    setState(() { _busy = true; _error = null; });
+
+    try {
+      // Conecta ao PC via USB (adb reverse)
+      await widget.ws.connect('127.0.0.1', widget.port)
+          .timeout(const Duration(seconds: 3));
+
+      // IMPORTANTE: cria o listener ANTES de qualquer envio para evitar race condition.
+      // O stream broadcast do WsClient garante que mensagens chegadas após a subscrição
+      // são entregues; ao criar o Future aqui, capturamos a mensagem mesmo que chegue
+      // muito rapidamente após o pair_request.
       final pairResultFuture = widget.ws.messages
           .firstWhere((m) => m['type'] == 'pair_accepted' || m['type'] == 'pair_rejected')
           .timeout(const Duration(seconds: 15));
@@ -99,41 +60,53 @@ class _PairingScreenState extends State<PairingScreen> with SingleTickerProvider
       final deviceId = await _pairingManager.getOrCreateDeviceId();
       final myPk = await _pairingManager.generateEphemeralKeyPair();
 
-      // 2. Enviar hello, esperar welcome
-      widget.ws.sendHello(deviceId, _pairingManager.deviceName);
-      final welcome = await widget.ws.waitForType('welcome')
+      // 1. Hello — listener de welcome também criado antes do envio
+      final welcomeFuture = widget.ws.messages
+          .firstWhere((m) => m['type'] == 'welcome')
           .timeout(const Duration(seconds: 5));
-      final pcPk = welcome?['pk'] as String? ?? '';
 
-      // 3. Enviar pair_request — listener já está ativo
+      widget.ws.sendHello(deviceId, _pairingManager.deviceName);
+      final welcome = await welcomeFuture;
+      final pcPk = welcome['pk'] as String? ?? '';
+
+      // 2. Pair request — resultado já sendo aguardado pelo listener acima
+      debugPrint('[Pairing] Enviando pair_request com pin="$pin"');
       widget.ws.sendPairRequest(
-        pin: _pinController.text.trim(),
+        pin: pin,
         pk: myPk,
         deviceId: deviceId,
         deviceName: _pairingManager.deviceName,
       );
 
       final result = await pairResultFuture;
+      debugPrint('[Pairing] Resposta do PC: $result');
       final accepted = result['type'] == 'pair_accepted';
 
       if (accepted) {
         await _pairingManager.deriveAndPersist(
           pcPublicKeyB64: pcPk,
-          pcDeviceId: welcome?['deviceId'] ?? 'unknown',
-          pcDeviceName: welcome?['deviceName'] ?? 'Iriseus PC',
-          pcIp: widget.ip!,
+          pcDeviceId: welcome['deviceId'] as String? ?? 'unknown',
+          pcDeviceName: welcome['deviceName'] as String? ?? 'Iriseus PC',
+          pcIp: '127.0.0.1',
         );
       }
 
       if (!mounted) return;
+
       if (accepted) {
-        Navigator.pushReplacement(context, MaterialPageRoute(
-            builder: (_) => CameraScreen(ws: widget.ws, pcIp: widget.ip!)));
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(
+            builder: (_) => CameraScreen(ws: widget.ws, pcIp: '127.0.0.1'),
+          ),
+        );
       } else {
-        setState(() => _error = 'PIN incorreto ou rejeitado.');
+        setState(() => _error = 'PIN incorreto. Verifique o código no PC e tente novamente.');
       }
+    } on TimeoutException {
+      setState(() => _error = 'Tempo esgotado. Verifique a conexão USB.');
     } catch (e) {
-      setState(() => _error = 'Falha ao conectar ao PC.');
+      setState(() => _error = 'Falha ao conectar ao PC. Verifique o cabo USB.');
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -141,30 +114,139 @@ class _PairingScreenState extends State<PairingScreen> with SingleTickerProvider
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
     return Scaffold(
-      appBar: AppBar(title: const Text('Parear dispositivo'),
-          bottom: TabBar(controller: _tabController,
-              tabs: const [Tab(text: 'QR Code'), Tab(text: 'PIN manual')])),
-      body: Column(children: [
-        if (_error != null)
-          Container(color: Colors.red.shade100, padding: const EdgeInsets.all(8),
-              width: double.infinity, child: Text(_error!, style: const TextStyle(color: Colors.red))),
-        Expanded(
-          child: TabBarView(controller: _tabController, children: [
-            MobileScanner(onDetect: _handleQrDetect),
-            Padding(
-              padding: const EdgeInsets.all(24),
-              child: Column(children: [
-                TextField(controller: _pinController, keyboardType: TextInputType.number,
-                    decoration: const InputDecoration(labelText: 'PIN exibido no PC')),
-                const SizedBox(height: 16),
-                FilledButton(onPressed: _busy ? null : _handlePinSubmit,
-                    child: _busy ? const CircularProgressIndicator() : const Text('Parear')),
-              ]),
-            ),
-          ]),
+      appBar: AppBar(
+        title: const Text('Parear com PC'),
+        centerTitle: true,
+      ),
+      body: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 24),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Spacer(),
+
+              Icon(
+                Icons.lock_open_rounded,
+                size: 64,
+                color: theme.colorScheme.primary,
+              ),
+              const SizedBox(height: 20),
+
+              Text(
+                'Digite o código',
+                style: theme.textTheme.headlineSmall?.copyWith(
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Abra o Iriseus no PC e clique em\n"Parear novo dispositivo" para ver o código.',
+                style: theme.textTheme.bodyMedium?.copyWith(
+                  color: theme.colorScheme.onSurface.withValues(alpha: 0.6),
+                ),
+                textAlign: TextAlign.center,
+              ),
+
+              const SizedBox(height: 40),
+
+              // Campo PIN
+              TextField(
+                controller: _pinController,
+                focusNode: _focusNode,
+                keyboardType: TextInputType.number,
+                textAlign: TextAlign.center,
+                maxLength: 6,
+                inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                enabled: !_busy,
+                style: theme.textTheme.displaySmall?.copyWith(
+                  fontWeight: FontWeight.bold,
+                  letterSpacing: 12,
+                ),
+                decoration: InputDecoration(
+                  counterText: '',
+                  hintText: '000000',
+                  hintStyle: theme.textTheme.displaySmall?.copyWith(
+                    color: theme.colorScheme.onSurface.withValues(alpha: 0.2),
+                    letterSpacing: 12,
+                  ),
+                  filled: true,
+                  fillColor: theme.colorScheme.surfaceContainerHighest,
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(16),
+                    borderSide: BorderSide.none,
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(16),
+                    borderSide: BorderSide(
+                      color: theme.colorScheme.primary,
+                      width: 2,
+                    ),
+                  ),
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
+                ),
+                onSubmitted: (_) => _busy ? null : _handlePinSubmit(),
+              ),
+
+              const SizedBox(height: 16),
+
+              // Erro
+              AnimatedSize(
+                duration: const Duration(milliseconds: 200),
+                child: _error != null
+                    ? Container(
+                        margin: const EdgeInsets.only(bottom: 8),
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                        decoration: BoxDecoration(
+                          color: theme.colorScheme.errorContainer,
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Row(
+                          children: [
+                            Icon(Icons.error_outline, color: theme.colorScheme.error, size: 18),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                _error!,
+                                style: TextStyle(color: theme.colorScheme.onErrorContainer),
+                              ),
+                            ),
+                          ],
+                        ),
+                      )
+                    : const SizedBox.shrink(),
+              ),
+
+              const SizedBox(height: 8),
+
+              // Botão Parear
+              SizedBox(
+                width: double.infinity,
+                height: 52,
+                child: FilledButton.icon(
+                  onPressed: _busy ? null : _handlePinSubmit,
+                  icon: _busy
+                      ? const SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                        )
+                      : const Icon(Icons.link),
+                  label: Text(_busy ? 'Pareando...' : 'Parear'),
+                  style: FilledButton.styleFrom(
+                    textStyle: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                  ),
+                ),
+              ),
+
+              const Spacer(),
+            ],
+          ),
         ),
-      ]),
+      ),
     );
   }
 }
