@@ -71,6 +71,41 @@ class WsClient {
   void sendStartCamera() => send({'type': 'start_camera'});
   void sendStopCamera() => send({'type': 'stop_camera'});
 
+  void sendFileOffer({
+    required String transferId,
+    required String name,
+    required int size,
+    required String mime,
+    required String sha256,
+  }) =>
+      send({
+        'type': 'file_offer',
+        'transferId': transferId,
+        'name': name,
+        'size': size,
+        'mime': mime,
+        'sha256': sha256,
+      });
+
+  void sendFileAccept(String transferId) =>
+      send({'type': 'file_accept', 'transferId': transferId});
+
+  void sendFileReject(String transferId, [String reason = 'user']) =>
+      send({'type': 'file_reject', 'transferId': transferId, 'reason': reason});
+
+  void sendFileCancel(String transferId) =>
+      send({'type': 'file_cancel', 'transferId': transferId});
+
+  void sendFileComplete(String transferId, bool ok, [String? error]) {
+    final payload = <String, dynamic>{
+      'type': 'file_complete',
+      'transferId': transferId,
+      'ok': ok,
+    };
+    if (error != null) payload['error'] = error;
+    send(payload);
+  }
+
   /// Espera mensagem de tipo específico, com timeout. Usado após hello/pair_request.
   Future<Map<String, dynamic>?> waitForType(String type, {Duration timeout = const Duration(seconds: 5)}) async {
     try {

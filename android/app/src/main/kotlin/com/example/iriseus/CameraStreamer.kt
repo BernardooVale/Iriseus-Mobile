@@ -41,6 +41,7 @@ class CameraStreamer(
     private var socket: Socket? = null
     private var outputStream: OutputStream? = null
     @Volatile private var streaming = false
+    private val encoderLock = Any()
     private var analysisExecutor = Executors.newSingleThreadExecutor()
     private var networkExecutor  = Executors.newSingleThreadExecutor()
     private var onStatus: ((String) -> Unit)? = null
@@ -70,7 +71,6 @@ class CameraStreamer(
 
         previewView?.let { pv ->
             val preview = Preview.Builder()
-                .setTargetResolution(Size(WIDTH, HEIGHT))
                 .build().also {
                     it.setSurfaceProvider(pv.surfaceProvider)
                 }
@@ -224,8 +224,13 @@ class CameraStreamer(
                 image.close()
                 return
             }
-            if (encoder == null) { image.close(); return }
-            queueToEncoder(image)
+            synchronized(encoderLock) {
+                if (!streaming || encoder == null) {
+                    image.close()
+                    return
+                }
+                queueToEncoder(image)
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Erro processando frame", e)
         } finally {
@@ -316,11 +321,13 @@ class CameraStreamer(
     }
 
     private fun releaseEncoder() {
-        try {
-            encoder?.stop()
-            encoder?.release()
-        } catch (_: Exception) {}
-        encoder = null
+        synchronized(encoderLock) {
+            try {
+                encoder?.stop()
+                encoder?.release()
+            } catch (_: Exception) {}
+            encoder = null
+        }
     }
 
     private fun postStatus(status: String) {

@@ -1,12 +1,21 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter/rendering.dart';
 import '../core/stream_controller.dart';
 import '../core/ws_client.dart';
 import '../core/pairing_manager.dart';
+import '../core/file_transfer_manager.dart';
 
 class CameraScreen extends StatefulWidget {
   final WsClient ws;
   final String pcIp;
-  const CameraScreen({super.key, required this.ws, required this.pcIp});
+  final FileTransferManager? fileManager;
+  const CameraScreen({
+    super.key,
+    required this.ws,
+    required this.pcIp,
+    this.fileManager,
+  });
   @override
   State<CameraScreen> createState() => _CameraScreenState();
 }
@@ -14,11 +23,21 @@ class CameraScreen extends StatefulWidget {
 class _CameraScreenState extends State<CameraScreen> {
   final _streamController = CameraStreamController();
   final _pairingManager = PairingManager();
+  late final FileTransferManager _fileTransferManager;
   CameraStreamStatus _status = CameraStreamStatus.idle;
+
+  bool _ownsFileManager = false;
 
   @override
   void initState() {
     super.initState();
+    if (widget.fileManager != null) {
+      _fileTransferManager = widget.fileManager!;
+      _ownsFileManager = false;
+    } else {
+      _fileTransferManager = FileTransferManager(widget.ws);
+      _ownsFileManager = true;
+    }
     _streamController.init();
     _streamController.status.listen((s) {
       if (mounted) setState(() => _status = s);
@@ -41,6 +60,9 @@ class _CameraScreenState extends State<CameraScreen> {
   void dispose() {
     // Não para o streaming ao sair da tela — o ForegroundService continua
     // Só envia stopCamera se for desconexão explícita pelo usuário
+    if (_ownsFileManager) {
+      _fileTransferManager.dispose();
+    }
     _streamController.dispose();
     super.dispose();
   }
@@ -57,34 +79,61 @@ class _CameraScreenState extends State<CameraScreen> {
     return Scaffold(
       backgroundColor: Colors.black,
       body: Stack(
+        fit: StackFit.expand,
         children: [
-          // Preview da câmera
-          const Positioned.fill(
-            child: AndroidView(viewType: 'com.example.iriseus/camera_preview'),
+          // Preview da câmera preenchendo a tela inteira via Hybrid Composition
+          PlatformViewLink(
+            viewType: 'com.example.iriseus/camera_preview',
+            surfaceFactory: (context, controller) {
+              return AndroidViewSurface(
+                controller: controller as AndroidViewController,
+                hitTestBehavior: PlatformViewHitTestBehavior.opaque,
+                gestureRecognizers: const {},
+              );
+            },
+            onCreatePlatformView: (params) {
+              return PlatformViewsService.initExpensiveAndroidView(
+                id: params.id,
+                viewType: 'com.example.iriseus/camera_preview',
+                layoutDirection: TextDirection.ltr,
+                creationParams: const {},
+                creationParamsCodec: const StandardMessageCodec(),
+                onFocus: () {
+                  params.onFocusChanged(true);
+                },
+              )
+                ..addOnPlatformViewCreatedListener(params.onPlatformViewCreated)
+                ..create();
+            },
           ),
 
-          // Overlay superior com status
-          SafeArea(
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Row(
-                children: [
-                  // Indicador de streaming (ponto pulsante)
-                  _StatusChip(status: _status),
-                  const Spacer(),
-                  // Botão trocar câmera
-                  Container(
-                    decoration: BoxDecoration(
-                      color: Colors.black.withValues(alpha: 0.5),
-                      shape: BoxShape.circle,
+          // Overlay superior com status e troca de câmera (fixado no topo)
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            child: SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Row(
+                  children: [
+                    // Indicador de streaming (ponto pulsante)
+                    _StatusChip(status: _status),
+                    const Spacer(),
+                    // Botão trocar câmera
+                    Container(
+                      decoration: BoxDecoration(
+                        color: Colors.black.withValues(alpha: 0.5),
+                        shape: BoxShape.circle,
+                      ),
+                      child: IconButton(
+                        onPressed: () => _streamController.switchCamera(),
+                        icon: const Icon(Icons.cameraswitch, color: Colors.white),
+                        tooltip: 'Trocar câmera',
+                      ),
                     ),
-                    child: IconButton(
-                      onPressed: () => _streamController.switchCamera(),
-                      icon: const Icon(Icons.cameraswitch, color: Colors.white),
-                      tooltip: 'Trocar câmera',
-                    ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
           ),

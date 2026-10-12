@@ -3,7 +3,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../core/pairing_manager.dart';
 import '../core/ws_client.dart';
-import 'camera_screen.dart';
 
 class PairingScreen extends StatefulWidget {
   final WsClient ws;
@@ -94,12 +93,7 @@ class _PairingScreenState extends State<PairingScreen> {
       if (!mounted) return;
 
       if (accepted) {
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(
-            builder: (_) => CameraScreen(ws: widget.ws, pcIp: '127.0.0.1'),
-          ),
-        );
+        Navigator.pop(context, true);
       } else {
         setState(() => _error = 'PIN incorreto. Verifique o código no PC e tente novamente.');
       }
