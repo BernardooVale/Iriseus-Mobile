@@ -8,9 +8,10 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
-    <!-- ForegroundService com câmera em background -->
+    <!-- ForegroundService com câmera e gravação de tela em background -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
 
     <!-- WakeLock para manter CPU ativo com tela desligada -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
@@ -42,12 +43,12 @@
             </intent-filter>
         </activity>
 
-        <!-- ForegroundService de câmera — sobrevive à tela desligada -->
+        <!-- ForegroundService de câmera e tela — sobrevive à tela desligada -->
         <service
             android:name=".CameraForegroundService"
             android:enabled="true"
             android:exported="false"
-            android:foregroundServiceType="camera" />
+            android:foregroundServiceType="camera|mediaProjection" />
 
         <meta-data
             android:name="flutterEmbedding"

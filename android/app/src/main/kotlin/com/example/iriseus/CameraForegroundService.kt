@@ -14,9 +14,9 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleService
 
 /**
- * ForegroundService que gerencia câmera + encoder + TCP stream.
+ * ForegroundService que gerencia câmera/tela + encoder + TCP stream.
  * Permanece ativo com tela desligada graças ao WakeLock PARTIAL e
- * à notificação persistente exigida pelo Android para câmera em background.
+ * à notificação persistente exigida pelo Android para câmera e captura de tela em background.
  */
 class CameraForegroundService : LifecycleService() {
 
@@ -25,24 +25,29 @@ class CameraForegroundService : LifecycleService() {
         private const val CHANNEL_ID = "iriseus_stream"
         private const val NOTIFICATION_ID = 1
 
-        const val ACTION_START_STREAM  = "com.example.iriseus.START_STREAM"
-        const val ACTION_STOP_STREAM   = "com.example.iriseus.STOP_STREAM"
-        const val ACTION_SWITCH_CAMERA = "com.example.iriseus.SWITCH_CAMERA"
-        const val ACTION_STOP_SERVICE  = "com.example.iriseus.STOP_SERVICE"
+        const val ACTION_START_STREAM       = "com.example.iriseus.START_STREAM"
+        const val ACTION_STOP_STREAM        = "com.example.iriseus.STOP_STREAM"
+        const val ACTION_SWITCH_CAMERA      = "com.example.iriseus.SWITCH_CAMERA"
+        const val ACTION_STOP_SERVICE       = "com.example.iriseus.STOP_SERVICE"
+        const val ACTION_START_SCREEN_SHARE = "com.example.iriseus.START_SCREEN_SHARE"
+        const val ACTION_STOP_SCREEN_SHARE  = "com.example.iriseus.STOP_SCREEN_SHARE"
 
-        const val EXTRA_IP   = "ip"
-        const val EXTRA_PORT = "port"
+        const val EXTRA_IP          = "ip"
+        const val EXTRA_PORT        = "port"
+        const val EXTRA_RESULT_CODE = "resultCode"
+        const val EXTRA_DATA_INTENT = "dataIntent"
 
         @Volatile var activeStreamer: CameraStreamer? = null
         @Volatile var currentPreviewView: PreviewView? = null
-        var statusCallback: ((String) -> Unit)? = null
+        @Volatile var currentMode: String = "camera" // "camera" | "screen"
+        var statusCallback: ((String, String) -> Unit)? = null
 
         fun attachPreview(pv: PreviewView?) {
             currentPreviewView = pv
             activeStreamer?.setPreviewView(pv)
         }
 
-        /** Inicia o serviço e começa a transmissão. */
+        /** Inicia o serviço e começa a transmissão de câmera. */
         fun startStream(context: Context, ip: String, port: Int) {
             val intent = Intent(context, CameraForegroundService::class.java).apply {
                 action = ACTION_START_STREAM
@@ -62,6 +67,23 @@ class CameraForegroundService : LifecycleService() {
         fun switchCamera(context: Context) {
             context.startService(Intent(context, CameraForegroundService::class.java).apply {
                 action = ACTION_SWITCH_CAMERA
+            })
+        }
+
+        /** Inicia o compartilhamento de tela com permissão concedida. */
+        fun startScreenShare(context: Context, resultCode: Int, data: Intent) {
+            val intent = Intent(context, CameraForegroundService::class.java).apply {
+                action = ACTION_START_SCREEN_SHARE
+                putExtra(EXTRA_RESULT_CODE, resultCode)
+                putExtra(EXTRA_DATA_INTENT, data)
+            }
+            ContextCompat.startForegroundService(context, intent)
+        }
+
+        /** Encerra o compartilhamento de tela e retorna para a câmera. */
+        fun stopScreenShare(context: Context) {
+            context.startService(Intent(context, CameraForegroundService::class.java).apply {
+                action = ACTION_STOP_SCREEN_SHARE
             })
         }
     }
@@ -84,15 +106,46 @@ class CameraForegroundService : LifecycleService() {
             ACTION_START_STREAM -> {
                 val ip   = intent.getStringExtra(EXTRA_IP)   ?: "127.0.0.1"
                 val port = intent.getIntExtra(EXTRA_PORT, 45679)
+                currentMode = "camera"
                 startForegroundWithNotification()
                 initStreamerAndStart(ip, port)
+            }
+            ACTION_START_SCREEN_SHARE -> {
+                val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, 0)
+                @Suppress("DEPRECATION")
+                val data = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    intent.getParcelableExtra(EXTRA_DATA_INTENT, Intent::class.java)
+                } else {
+                    intent.getParcelableExtra(EXTRA_DATA_INTENT)
+                }
+
+                if (resultCode != 0 && data != null) {
+                    currentMode = "screen"
+                    // M1.3: Promover foregroundServiceType para MEDIA_PROJECTION antes de capturar
+                    promoteToMediaProjection()
+                    streamer?.startScreenCapture(resultCode, data)
+                    notifyStatus("streaming")
+                }
+            }
+            ACTION_STOP_SCREEN_SHARE -> {
+                currentMode = "camera"
+                streamer?.stopScreenCapture()
+                demoteToCamera()
+                notifyStatus("streaming")
             }
             ACTION_STOP_STREAM -> {
                 stopStreamInternal()
                 stopSelf()
             }
-            ACTION_SWITCH_CAMERA -> streamer?.switchCamera()
-            ACTION_STOP_SERVICE  -> { stopStreamInternal(); stopSelf() }
+            ACTION_SWITCH_CAMERA -> {
+                if (currentMode == "camera") {
+                    streamer?.switchCamera()
+                }
+            }
+            ACTION_STOP_SERVICE -> {
+                stopStreamInternal()
+                stopSelf()
+            }
         }
 
         return START_STICKY
@@ -109,18 +162,48 @@ class CameraForegroundService : LifecycleService() {
         val s = CameraStreamer(this, this, currentPreviewView)
         streamer = s
         activeStreamer = s
+        currentMode = "camera"
         s.startPreview()
-        s.startStreaming(ip, port) { status ->
-            statusCallback?.invoke(status)
-            updateNotificationStatus(status)
+        s.onScreenCaptureStopped = {
+            currentMode = "camera"
+            demoteToCamera()
+            notifyStatus("streaming")
         }
+        s.startStreaming(ip, port) { status ->
+            notifyStatus(status)
+        }
+    }
+
+    private fun notifyStatus(status: String) {
+        statusCallback?.invoke(status, currentMode)
+        updateNotificationStatus(status)
     }
 
     private fun stopStreamInternal() {
         activeStreamer = null
+        currentMode = "camera"
         streamer?.stopStreaming()
         streamer?.release()
         streamer = null
+    }
+
+    // ─── Foreground types ──────────────────────────────────────────────────
+    private fun promoteToMediaProjection() {
+        val notification = buildNotification("Transmitindo tela para o PC...")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
+    }
+
+    private fun demoteToCamera() {
+        val notification = buildNotification("Câmera transmitindo para o PC...")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA)
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
     }
 
     // ─── Notificação persistente ────────────────────────────────────────────
@@ -130,7 +213,7 @@ class CameraForegroundService : LifecycleService() {
             "Iriseus — Transmissão",
             NotificationManager.IMPORTANCE_LOW
         ).apply {
-            description = "Notificação de transmissão ativa da câmera"
+            description = "Notificação de transmissão ativa da câmera ou tela"
             setShowBadge(false)
         }
         (getSystemService(NOTIFICATION_SERVICE) as NotificationManager)
@@ -149,10 +232,16 @@ class CameraForegroundService : LifecycleService() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
+        val iconRes = if (currentMode == "screen") {
+            android.R.drawable.ic_menu_slideshow
+        } else {
+            android.R.drawable.ic_menu_camera
+        }
+
         return Notification.Builder(this, CHANNEL_ID)
             .setContentTitle("Iriseus")
             .setContentText(statusText)
-            .setSmallIcon(android.R.drawable.ic_menu_camera)
+            .setSmallIcon(iconRes)
             .setContentIntent(openIntent)
             .setOngoing(true)
             .addAction(
@@ -176,7 +265,7 @@ class CameraForegroundService : LifecycleService() {
 
     private fun updateNotificationStatus(status: String) {
         val text = when (status) {
-            "streaming"  -> "Câmera transmitindo para o PC"
+            "streaming"  -> if (currentMode == "screen") "Transmitindo a tela para o PC" else "Câmera transmitindo para o PC"
             "connecting" -> "Conectando ao PC..."
             "error"      -> "Erro na transmissão — reconectando"
             else         -> "Iriseus ativo"

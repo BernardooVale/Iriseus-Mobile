@@ -70,6 +70,8 @@ class WsClient {
 
   void sendStartCamera() => send({'type': 'start_camera'});
   void sendStopCamera() => send({'type': 'stop_camera'});
+  void sendStartScreen() => send({'type': 'start_screen'});
+  void sendStopScreen() => send({'type': 'stop_screen'});
 
   void sendFileOffer({
     required String transferId,

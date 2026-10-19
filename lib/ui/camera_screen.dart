@@ -25,6 +25,7 @@ class _CameraScreenState extends State<CameraScreen> {
   final _pairingManager = PairingManager();
   late final FileTransferManager _fileTransferManager;
   CameraStreamStatus _status = CameraStreamStatus.idle;
+  StreamMode _mode = StreamMode.camera;
 
   bool _ownsFileManager = false;
 
@@ -42,11 +43,18 @@ class _CameraScreenState extends State<CameraScreen> {
     _streamController.status.listen((s) {
       if (mounted) setState(() => _status = s);
     });
+    _streamController.mode.listen((m) {
+      if (mounted) setState(() => _mode = m);
+    });
 
     widget.ws.enableAutoReconnect(widget.pcIp, 45678, () async {
       final deviceId = await _pairingManager.getOrCreateDeviceId();
       widget.ws.sendHello(deviceId, _pairingManager.deviceName);
-      widget.ws.sendStartCamera();
+      if (_mode == StreamMode.screen) {
+        widget.ws.sendStartScreen();
+      } else {
+        widget.ws.sendStartCamera();
+      }
       _streamController.startStreaming(widget.pcIp, 45679);
     });
 
@@ -67,7 +75,22 @@ class _CameraScreenState extends State<CameraScreen> {
     super.dispose();
   }
 
+  Future<void> _toggleScreenShare() async {
+    if (_mode == StreamMode.camera) {
+      final ok = await _streamController.startScreenShare();
+      if (ok) {
+        widget.ws.sendStartScreen();
+      }
+    } else {
+      await _streamController.stopScreenShare();
+      widget.ws.sendStopScreen();
+    }
+  }
+
   Future<void> _disconnect() async {
+    if (_mode == StreamMode.screen) {
+      widget.ws.sendStopScreen();
+    }
     widget.ws.sendStopCamera();
     await _streamController.stopStreaming();
     if (mounted) Navigator.pop(context);
@@ -75,39 +98,73 @@ class _CameraScreenState extends State<CameraScreen> {
 
   @override
   Widget build(BuildContext context) {
-
     return Scaffold(
       backgroundColor: Colors.black,
       body: Stack(
         fit: StackFit.expand,
         children: [
-          // Preview da câmera preenchendo a tela inteira via Hybrid Composition
-          PlatformViewLink(
-            viewType: 'com.example.iriseus/camera_preview',
-            surfaceFactory: (context, controller) {
-              return AndroidViewSurface(
-                controller: controller as AndroidViewController,
-                hitTestBehavior: PlatformViewHitTestBehavior.opaque,
-                gestureRecognizers: const {},
-              );
-            },
-            onCreatePlatformView: (params) {
-              return PlatformViewsService.initExpensiveAndroidView(
-                id: params.id,
-                viewType: 'com.example.iriseus/camera_preview',
-                layoutDirection: TextDirection.ltr,
-                creationParams: const {},
-                creationParamsCodec: const StandardMessageCodec(),
-                onFocus: () {
-                  params.onFocusChanged(true);
-                },
-              )
-                ..addOnPlatformViewCreatedListener(params.onPlatformViewCreated)
-                ..create();
-            },
-          ),
+          // Preview da câmera preenchendo a tela inteira quando em modo câmera
+          // Anti-loop: removido e substituído por painel estático quando em modo tela
+          if (_mode == StreamMode.camera)
+            PlatformViewLink(
+              viewType: 'com.example.iriseus/camera_preview',
+              surfaceFactory: (context, controller) {
+                return AndroidViewSurface(
+                  controller: controller as AndroidViewController,
+                  hitTestBehavior: PlatformViewHitTestBehavior.opaque,
+                  gestureRecognizers: const {},
+                );
+              },
+              onCreatePlatformView: (params) {
+                return PlatformViewsService.initExpensiveAndroidView(
+                  id: params.id,
+                  viewType: 'com.example.iriseus/camera_preview',
+                  layoutDirection: TextDirection.ltr,
+                  creationParams: const {},
+                  creationParamsCodec: const StandardMessageCodec(),
+                  onFocus: () {
+                    params.onFocusChanged(true);
+                  },
+                )
+                  ..addOnPlatformViewCreatedListener(params.onPlatformViewCreated)
+                  ..create();
+              },
+            )
+          else
+            // Painel estático anti-loop durante a transmissão da tela
+            Center(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 32),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(24),
+                      decoration: BoxDecoration(
+                        color: Colors.blueAccent.withValues(alpha: 0.12),
+                        shape: BoxShape.circle,
+                        border: Border.all(color: Colors.blueAccent.withValues(alpha: 0.3)),
+                      ),
+                      child: const Icon(Icons.screen_share_rounded, size: 56, color: Colors.blueAccent),
+                    ),
+                    const SizedBox(height: 24),
+                    const Text(
+                      'Transmitindo a tela do celular',
+                      style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold),
+                      textAlign: TextAlign.center,
+                    ),
+                    const SizedBox(height: 8),
+                    const Text(
+                      'A tela está sendo espelhada no PC.\nVocê pode minimizar este aplicativo com segurança.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: Colors.white70, fontSize: 14),
+                    ),
+                  ],
+                ),
+              ),
+            ),
 
-          // Overlay superior com status e troca de câmera (fixado no topo)
+          // Overlay superior com status, botão de tela e botão de câmera
           Positioned(
             top: 0,
             left: 0,
@@ -118,20 +175,46 @@ class _CameraScreenState extends State<CameraScreen> {
                 child: Row(
                   children: [
                     // Indicador de streaming (ponto pulsante)
-                    _StatusChip(status: _status),
+                    _StatusChip(status: _status, mode: _mode),
                     const Spacer(),
-                    // Botão trocar câmera
+
+                    // Botão transmitir/parar tela
                     Container(
                       decoration: BoxDecoration(
-                        color: Colors.black.withValues(alpha: 0.5),
+                        color: _mode == StreamMode.screen
+                            ? Colors.blueAccent.withValues(alpha: 0.8)
+                            : Colors.black.withValues(alpha: 0.5),
                         shape: BoxShape.circle,
                       ),
                       child: IconButton(
-                        onPressed: () => _streamController.switchCamera(),
-                        icon: const Icon(Icons.cameraswitch, color: Colors.white),
-                        tooltip: 'Trocar câmera',
+                        onPressed: _toggleScreenShare,
+                        icon: Icon(
+                          _mode == StreamMode.screen
+                              ? Icons.stop_screen_share_outlined
+                              : Icons.screen_share_outlined,
+                          color: Colors.white,
+                        ),
+                        tooltip: _mode == StreamMode.screen
+                            ? 'Voltar para a câmera'
+                            : 'Transmitir tela do celular',
                       ),
                     ),
+
+                    // Botão trocar câmera (só visível no modo câmera)
+                    if (_mode == StreamMode.camera) ...[
+                      const SizedBox(width: 8),
+                      Container(
+                        decoration: BoxDecoration(
+                          color: Colors.black.withValues(alpha: 0.5),
+                          shape: BoxShape.circle,
+                        ),
+                        child: IconButton(
+                          onPressed: () => _streamController.switchCamera(),
+                          icon: const Icon(Icons.cameraswitch, color: Colors.white),
+                          tooltip: 'Trocar câmera',
+                        ),
+                      ),
+                    ],
                   ],
                 ),
               ),
@@ -201,7 +284,8 @@ class _CameraScreenState extends State<CameraScreen> {
 
 class _StatusChip extends StatefulWidget {
   final CameraStreamStatus status;
-  const _StatusChip({required this.status});
+  final StreamMode mode;
+  const _StatusChip({required this.status, required this.mode});
 
   @override
   State<_StatusChip> createState() => _StatusChipState();
@@ -229,13 +313,13 @@ class _StatusChipState extends State<_StatusChip> with SingleTickerProviderState
   Widget build(BuildContext context) {
     final isStreaming = widget.status == CameraStreamStatus.streaming;
     final color = switch (widget.status) {
-      CameraStreamStatus.streaming => Colors.green,
+      CameraStreamStatus.streaming => widget.mode == StreamMode.screen ? Colors.blueAccent : Colors.green,
       CameraStreamStatus.error     => Colors.red,
       CameraStreamStatus.connecting => Colors.orange,
       CameraStreamStatus.idle      => Colors.grey,
     };
     final label = switch (widget.status) {
-      CameraStreamStatus.streaming  => 'Transmitindo',
+      CameraStreamStatus.streaming  => widget.mode == StreamMode.screen ? 'Tela ativa' : 'Transmitindo',
       CameraStreamStatus.connecting => 'Conectando...',
       CameraStreamStatus.error      => 'Erro',
       CameraStreamStatus.idle       => 'Ocioso',

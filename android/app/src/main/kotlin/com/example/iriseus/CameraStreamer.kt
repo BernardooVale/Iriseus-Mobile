@@ -1,11 +1,22 @@
 package com.example.iriseus
 
 import android.content.Context
+import android.content.Intent
+import android.hardware.display.DisplayManager
+import android.hardware.display.VirtualDisplay
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
+import android.media.projection.MediaProjection
+import android.media.projection.MediaProjectionManager
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.util.DisplayMetrics
 import android.util.Log
 import android.util.Size
+import android.view.Surface
+import android.view.WindowManager
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
@@ -16,7 +27,6 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
 import java.io.OutputStream
 import java.net.Socket
-import java.nio.ByteBuffer
 import java.util.concurrent.Executors
 
 class CameraStreamer(
@@ -50,6 +60,15 @@ class CameraStreamer(
     @Volatile private var pendingWidth  = 0
     @Volatile private var pendingHeight = 0
 
+    // Componentes de captura de tela (MediaProjection)
+    private val mediaProjectionManager =
+        context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+    private var mediaProjection: MediaProjection? = null
+    private var virtualDisplay: VirtualDisplay? = null
+    private var screenInputSurface: Surface? = null
+    @Volatile private var isScreenSharing = false
+    var onScreenCaptureStopped: (() -> Unit)? = null
+
     // Buffers reutilizáveis — zero alocações por frame
     private var writeBuffer = ByteArray(4 + 128 * 1024)
     private var yRowBuffer  = ByteArray(4096)
@@ -59,13 +78,17 @@ class CameraStreamer(
         val providerFuture = ProcessCameraProvider.getInstance(context)
         providerFuture.addListener({
             cameraProvider = providerFuture.get()
-            bindUseCases()
+            if (!isScreenSharing) {
+                bindUseCases()
+            }
         }, ContextCompat.getMainExecutor(context))
     }
 
     private fun bindUseCases() {
         val provider = cameraProvider ?: return
         provider.unbindAll()
+
+        if (isScreenSharing) return
 
         val useCases = mutableListOf<androidx.camera.core.UseCase>()
 
@@ -91,16 +114,19 @@ class CameraStreamer(
 
     fun setPreviewView(pv: PreviewView?) {
         previewView = pv
-        if (cameraProvider != null) {
+        if (cameraProvider != null && !isScreenSharing) {
             bindUseCases()
         }
     }
 
     fun switchCamera() {
+        if (isScreenSharing) return
         lensFacing = if (lensFacing == CameraSelector.LENS_FACING_BACK)
             CameraSelector.LENS_FACING_FRONT else CameraSelector.LENS_FACING_BACK
         bindUseCases()
     }
+
+    fun isScreenSharing(): Boolean = isScreenSharing
 
     fun startStreaming(ip: String, port: Int, statusCallback: (String) -> Unit) {
         onStatus = statusCallback
@@ -132,7 +158,123 @@ class CameraStreamer(
         }
     }
 
+    fun startScreenCapture(resultCode: Int, data: Intent) {
+        if (isScreenSharing) stopScreenCapture()
+
+        isScreenSharing = true
+
+        // M3.2: Desligar câmera física para economizar bateria e processamento
+        try {
+            cameraProvider?.unbindAll()
+        } catch (e: Exception) {
+            Log.e(TAG, "Erro desvinculando use cases da câmera", e)
+        }
+
+        releaseEncoder()
+
+        // M3.3: Calcular resolução com base nas métricas da tela (max 1920, múltiplo de 16)
+        val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        val metrics = DisplayMetrics()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val bounds = windowManager.maximumWindowMetrics.bounds
+            metrics.widthPixels = bounds.width()
+            metrics.heightPixels = bounds.height()
+            metrics.densityDpi = context.resources.configuration.densityDpi
+        } else {
+            @Suppress("DEPRECATION")
+            windowManager.defaultDisplay.getRealMetrics(metrics)
+        }
+
+        val rawW = metrics.widthPixels
+        val rawH = metrics.heightPixels
+        val maxDim = 1920
+        val scale = if (Math.max(rawW, rawH) > maxDim) maxDim.toFloat() / Math.max(rawW, rawH) else 1.0f
+        var sW = (rawW * scale).toInt()
+        var sH = (rawH * scale).toInt()
+        sW = (sW / 16) * 16
+        sH = (sH / 16) * 16
+        if (sW < 16) sW = 16
+        if (sH < 16) sH = 16
+        val sDpi = metrics.densityDpi
+
+        Log.d(TAG, "Iniciando captura de tela: ${sW}x${sH} @ ${sDpi}dpi (tela real: ${rawW}x${rawH})")
+
+        // M3.4: MediaCodec configurado com COLOR_FormatSurface e KEY_REPEAT_PREVIOUS_FRAME_AFTER
+        val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, sW, sH).apply {
+            setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
+            setInteger(MediaFormat.KEY_BIT_RATE, BITRATE)
+            setInteger(MediaFormat.KEY_FRAME_RATE, FRAME_RATE)
+            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, I_FRAME_INTERVAL)
+            setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
+            setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 100_000L) // 100ms
+            try {
+                setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileHigh)
+            } catch (_: Exception) {}
+        }
+
+        val screenEncoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC).apply {
+            configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+        }
+        val inputSurface = screenEncoder.createInputSurface()
+        screenEncoder.start()
+
+        synchronized(encoderLock) {
+            encoder = screenEncoder
+            screenInputSurface = inputSurface
+            encoderWidth = sW
+            encoderHeight = sH
+        }
+
+        // M3.5 & M3.6: Obter MediaProjection, registrar Callback e criar VirtualDisplay
+        val mp = mediaProjectionManager.getMediaProjection(resultCode, data)
+        mp.registerCallback(object : MediaProjection.Callback() {
+            override fun onStop() {
+                Log.d(TAG, "MediaProjection interrompido pelo sistema Android")
+                if (isScreenSharing) {
+                    stopScreenCapture()
+                    onScreenCaptureStopped?.invoke()
+                }
+            }
+        }, Handler(Looper.getMainLooper()))
+        mediaProjection = mp
+
+        virtualDisplay = mp.createVirtualDisplay(
+            "IriseusScreen",
+            sW,
+            sH,
+            sDpi,
+            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+            inputSurface,
+            null,
+            null
+        )
+    }
+
+    fun stopScreenCapture() {
+        if (!isScreenSharing && mediaProjection == null) return
+        isScreenSharing = false
+
+        try { virtualDisplay?.release() } catch (_: Exception) {}
+        virtualDisplay = null
+
+        try { mediaProjection?.stop() } catch (_: Exception) {}
+        mediaProjection = null
+
+        try { screenInputSurface?.release() } catch (_: Exception) {}
+        screenInputSurface = null
+
+        releaseEncoder()
+
+        // M3.7: Religar use cases da câmera
+        if (cameraProvider != null) {
+            bindUseCases()
+        } else {
+            startPreview()
+        }
+    }
+
     private fun setupEncoder(w: Int, h: Int) {
+        if (isScreenSharing) return
         encoderWidth  = w
         encoderHeight = h
         val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, w, h).apply {
@@ -156,7 +298,7 @@ class CameraStreamer(
     private fun drainEncoderLoop() {
         val bufferInfo = MediaCodec.BufferInfo()
         while (streaming) {
-            if (pendingWidth != 0 && pendingHeight != 0) {
+            if (!isScreenSharing && pendingWidth != 0 && pendingHeight != 0) {
                 val w = pendingWidth
                 val h = pendingHeight
                 pendingWidth  = 0
@@ -172,7 +314,12 @@ class CameraStreamer(
                 continue
             }
 
-            val outIndex = codec.dequeueOutputBuffer(bufferInfo, 0)
+            val outIndex = try {
+                codec.dequeueOutputBuffer(bufferInfo, 0)
+            } catch (_: Exception) {
+                -1
+            }
+
             if (outIndex >= 0) {
                 val outBuffer = codec.getOutputBuffer(outIndex) ?: run {
                     codec.releaseOutputBuffer(outIndex, false)
@@ -214,7 +361,7 @@ class CameraStreamer(
     }
 
     private fun onFrame(image: ImageProxy) {
-        if (!streaming) { image.close(); return }
+        if (!streaming || isScreenSharing) { image.close(); return }
         try {
             val w = image.width
             val h = image.height
@@ -225,7 +372,7 @@ class CameraStreamer(
                 return
             }
             synchronized(encoderLock) {
-                if (!streaming || encoder == null) {
+                if (!streaming || encoder == null || isScreenSharing) {
                     image.close()
                     return
                 }
@@ -303,6 +450,9 @@ class CameraStreamer(
     }
 
     fun stopStreaming() {
+        if (isScreenSharing) {
+            stopScreenCapture()
+        }
         streaming = false
         releaseEncoder()
         try { outputStream?.close() } catch (_: Exception) {}
