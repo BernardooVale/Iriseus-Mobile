@@ -227,6 +227,12 @@ class CameraStreamer(
 
         // M3.5 & M3.6: Obter MediaProjection, registrar Callback e criar VirtualDisplay
         val mp = mediaProjectionManager.getMediaProjection(resultCode, data)
+        if (mp == null) {
+            Log.e(TAG, "Falha ao obter MediaProjection: resultado nulo")
+            stopScreenCapture()
+            onScreenCaptureStopped?.invoke()
+            return
+        }
         mp.registerCallback(object : MediaProjection.Callback() {
             override fun onStop() {
                 Log.d(TAG, "MediaProjection interrompido pelo sistema Android")

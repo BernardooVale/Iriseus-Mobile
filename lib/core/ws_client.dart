@@ -72,6 +72,7 @@ class WsClient {
   void sendStopCamera() => send({'type': 'stop_camera'});
   void sendStartScreen() => send({'type': 'start_screen'});
   void sendStopScreen() => send({'type': 'stop_screen'});
+  void sendSetFlip(bool flip) => send({'type': 'set_flip', 'flip': flip});
 
   void sendFileOffer({
     required String transferId,

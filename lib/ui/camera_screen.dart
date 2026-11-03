@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/rendering.dart';
@@ -26,6 +27,8 @@ class _CameraScreenState extends State<CameraScreen> {
   late final FileTransferManager _fileTransferManager;
   CameraStreamStatus _status = CameraStreamStatus.idle;
   StreamMode _mode = StreamMode.camera;
+  bool _flipHorizontal = true;
+  StreamSubscription? _wsMessagesSub;
 
   bool _ownsFileManager = false;
 
@@ -45,6 +48,14 @@ class _CameraScreenState extends State<CameraScreen> {
     });
     _streamController.mode.listen((m) {
       if (mounted) setState(() => _mode = m);
+    });
+
+    _wsMessagesSub = widget.ws.messages.listen((msg) {
+      if (msg['type'] == 'welcome' && msg.containsKey('flip')) {
+        if (mounted) setState(() => _flipHorizontal = msg['flip'] as bool);
+      } else if (msg['type'] == 'flip_status' && msg.containsKey('flip')) {
+        if (mounted) setState(() => _flipHorizontal = msg['flip'] as bool);
+      }
     });
 
     widget.ws.enableAutoReconnect(widget.pcIp, 45678, () async {
@@ -68,6 +79,7 @@ class _CameraScreenState extends State<CameraScreen> {
   void dispose() {
     // Não para o streaming ao sair da tela — o ForegroundService continua
     // Só envia stopCamera se for desconexão explícita pelo usuário
+    _wsMessagesSub?.cancel();
     if (_ownsFileManager) {
       _fileTransferManager.dispose();
     }
@@ -85,6 +97,12 @@ class _CameraScreenState extends State<CameraScreen> {
       await _streamController.stopScreenShare();
       widget.ws.sendStopScreen();
     }
+  }
+
+  void _toggleFlip() {
+    final next = !_flipHorizontal;
+    setState(() => _flipHorizontal = next);
+    widget.ws.sendSetFlip(next);
   }
 
   Future<void> _disconnect() async {
@@ -215,6 +233,24 @@ class _CameraScreenState extends State<CameraScreen> {
                         ),
                       ),
                     ],
+
+                    // Botão espelhar/inverter horizontalmente
+                    const SizedBox(width: 8),
+                    Container(
+                      decoration: BoxDecoration(
+                        color: _flipHorizontal
+                            ? Colors.blueAccent.withValues(alpha: 0.8)
+                            : Colors.black.withValues(alpha: 0.5),
+                        shape: BoxShape.circle,
+                      ),
+                      child: IconButton(
+                        onPressed: _toggleFlip,
+                        icon: const Icon(Icons.flip, color: Colors.white),
+                        tooltip: _flipHorizontal
+                            ? 'Inverter horizontalmente (Ativo)'
+                            : 'Inverter horizontalmente (Inativo)',
+                      ),
+                    ),
                   ],
                 ),
               ),
